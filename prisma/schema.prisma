@@ -1,0 +1,376 @@
+// FraudLens data model.
+//
+// PostgreSQL is the only primary datastore. Every timestamp is stored as
+// `timestamptz` and written in UTC. Monetary amounts use NUMERIC(14,2) so that
+// no value is ever subject to binary floating-point rounding.
+
+generator client {
+  provider = "prisma-client-js"
+  output   = "../apps/api/src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum UserRole {
+  ADMIN
+  ANALYST
+  INVESTIGATOR
+  VIEWER
+}
+
+enum AccountStatus {
+  ACTIVE
+  DORMANT
+  SUSPENDED
+  CLOSED
+}
+
+enum TransactionChannel {
+  UPI_P2P
+  UPI_P2M
+  QR_CODE
+  COLLECT_REQUEST
+  AUTOPAY_MANDATE
+}
+
+enum TransactionStatus {
+  PENDING
+  COMPLETED
+  FAILED
+  REVERSED
+}
+
+enum RiskCategory {
+  LOW
+  MEDIUM
+  HIGH
+}
+
+enum AlertSeverity {
+  LOW
+  MEDIUM
+  HIGH
+  CRITICAL
+}
+
+/// Where an alert sits in the review process. Stored separately from the
+/// investigation outcome so that "has anyone looked at this yet?" and "what did
+/// they conclude?" remain independent questions.
+enum AlertStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+}
+
+/// What a human investigator concluded. PENDING means nobody has concluded
+/// anything yet — it is never evidence of either fraud or legitimacy.
+enum InvestigationOutcome {
+  PENDING
+  CONFIRMED_FRAUD
+  LEGITIMATE
+  INCONCLUSIVE
+}
+
+/// Ground-truth behaviour the simulator intended to emit. Kept apart from risk
+/// predictions so that detection metrics can be computed without leakage.
+enum ScenarioLabel {
+  NORMAL
+  HIGH_VALUE
+  RAPID_TRANSFER
+  NEW_DEVICE
+  SUSPICIOUS_RECEIVER
+  VOLUME_SPIKE
+}
+
+enum LabelSource {
+  SIMULATOR
+  INVESTIGATION
+}
+
+// ---------------------------------------------------------------------------
+// Identity and access
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String   @id @default(uuid()) @db.Uuid
+  name         String   @db.VarChar(120)
+  email        String   @unique @db.VarChar(254)
+  /// bcrypt hash. Never returned by any endpoint, never logged.
+  passwordHash String   @map("password_hash") @db.VarChar(255)
+  role         UserRole @default(VIEWER)
+  isActive     Boolean  @default(true) @map("is_active")
+  lastLoginAt  DateTime? @map("last_login_at") @db.Timestamptz(3)
+  createdAt    DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt    DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  assignedAlerts    Alert[]             @relation("AlertAssignee")
+  resolvedAlerts    Alert[]             @relation("AlertResolver")
+  investigationNotes InvestigationNote[]
+  auditLogs         AuditLog[]
+  updatedRules      FraudRule[]
+  updatedRiskSettings RiskSettings[]
+
+  @@index([role])
+  @@index([isActive])
+  @@index([createdAt])
+  @@map("users")
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic payment accounts
+// ---------------------------------------------------------------------------
+
+model Account {
+  id          String        @id @default(uuid()) @db.Uuid
+  /// Synthetic account reference such as `priya@fraudlens`. Not a real VPA.
+  accountRef  String        @unique @map("account_ref") @db.VarChar(64)
+  displayName String        @map("display_name") @db.VarChar(120)
+  status      AccountStatus @default(ACTIVE)
+  /// True for synthetic merchant accounts, which legitimately have high fan-in.
+  isMerchant  Boolean       @default(false) @map("is_merchant")
+  createdAt   DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  sentTransactions     Transaction[] @relation("TransactionSender")
+  receivedTransactions Transaction[] @relation("TransactionReceiver")
+
+  @@index([status])
+  @@index([isMerchant])
+  @@map("accounts")
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+model Transaction {
+  id                String             @id @default(uuid()) @db.Uuid
+  /// Caller-supplied identifier. Unique, so re-sending the same transaction is
+  /// rejected rather than duplicated.
+  externalId        String             @unique @map("external_id") @db.VarChar(64)
+  senderId          String             @map("sender_id") @db.Uuid
+  receiverId        String             @map("receiver_id") @db.Uuid
+  amount            Decimal            @db.Decimal(14, 2)
+  currency          String             @default("INR") @db.Char(3)
+  /// When the payment happened, in UTC. Distinct from `createdAt`, which is
+  /// when FraudLens ingested it.
+  occurredAt        DateTime           @map("occurred_at") @db.Timestamptz(3)
+  /// Synthetic device fingerprint. Never a real device identifier.
+  deviceFingerprint String             @map("device_fingerprint") @db.VarChar(128)
+  /// Computed server-side at ingestion by comparing against the sender's
+  /// device history. Never trusted from the client.
+  isNewDevice       Boolean            @default(false) @map("is_new_device")
+  channel           TransactionChannel @default(UPI_P2P)
+  status            TransactionStatus  @default(COMPLETED)
+  /// Optional ingestion idempotency key, unique when present.
+  idempotencyKey    String?            @unique @map("idempotency_key") @db.VarChar(128)
+  createdAt         DateTime           @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  sender          Account             @relation("TransactionSender", fields: [senderId], references: [id], onDelete: Restrict)
+  receiver        Account             @relation("TransactionReceiver", fields: [receiverId], references: [id], onDelete: Restrict)
+  riskAssessments RiskAssessment[]
+  alerts          Alert[]
+  label           TransactionLabel?
+
+  // Transaction history for a single account, newest first. Backs the
+  // historical-feature queries in the fraud engine.
+  @@index([senderId, occurredAt(sort: Desc)])
+  @@index([receiverId, occurredAt(sort: Desc)])
+  // Rapid-repeated-transfer lookups on the sender -> receiver pair.
+  @@index([senderId, receiverId, occurredAt(sort: Desc)])
+  // Device-history lookups for the new-device rule.
+  @@index([senderId, deviceFingerprint])
+  // Global monitoring list and date-range filters.
+  @@index([occurredAt(sort: Desc)])
+  @@index([createdAt(sort: Desc)])
+  @@index([status])
+  @@index([amount])
+  @@map("transactions")
+}
+
+/// Ground-truth label for a transaction, held in its own table so that it can
+/// never be confused with — or accidentally fed into — a risk prediction.
+model TransactionLabel {
+  id            String        @id @default(uuid()) @db.Uuid
+  transactionId String        @unique @map("transaction_id") @db.Uuid
+  label         ScenarioLabel
+  source        LabelSource   @default(SIMULATOR)
+  createdAt     DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+
+  @@index([label])
+  @@index([source])
+  @@map("transaction_labels")
+}
+
+// ---------------------------------------------------------------------------
+// Risk assessments
+// ---------------------------------------------------------------------------
+
+/// An immutable historical record of one evaluation of one transaction.
+/// Re-assessing a transaction inserts a new row; existing rows are never
+/// updated, so the reason an alert fired at the time stays reconstructable.
+model RiskAssessment {
+  id             String       @id @default(uuid()) @db.Uuid
+  transactionId  String       @map("transaction_id") @db.Uuid
+  /// Version of the ruleset (or model) that produced this score.
+  rulesetVersion String       @map("ruleset_version") @db.VarChar(32)
+  /// Integer 0..100, constrained in the database as well as in code.
+  riskScore      Int          @map("risk_score")
+  riskCategory   RiskCategory @map("risk_category")
+  /// Per-rule evidence: rule id, raw contribution, dampened contribution and
+  /// the feature values the rule actually looked at.
+  triggeredRules Json         @map("triggered_rules") @db.JsonB
+  /// Ordered, human-readable sentences explaining the score.
+  explanations   String[]     @map("explanations")
+  /// Snapshot of the historical features used, for reproducibility.
+  features       Json?        @db.JsonB
+  assessedAt     DateTime     @default(now()) @map("assessed_at") @db.Timestamptz(3)
+
+  transaction Transaction @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  alerts      Alert[]
+
+  @@index([transactionId, assessedAt(sort: Desc)])
+  @@index([riskCategory])
+  @@index([riskScore])
+  @@index([assessedAt(sort: Desc)])
+  @@index([rulesetVersion])
+  @@map("risk_assessments")
+}
+
+// ---------------------------------------------------------------------------
+// Alerts and investigations
+// ---------------------------------------------------------------------------
+
+model Alert {
+  id                String               @id @default(uuid()) @db.Uuid
+  transactionId     String               @map("transaction_id") @db.Uuid
+  riskAssessmentId  String               @map("risk_assessment_id") @db.Uuid
+  severity          AlertSeverity
+  /// Where the alert sits in the review process.
+  status            AlertStatus          @default(OPEN)
+  /// What a human concluded. Independent of `status`.
+  outcome           InvestigationOutcome @default(PENDING)
+  assignedToId      String?              @map("assigned_to_id") @db.Uuid
+  resolvedById      String?              @map("resolved_by_id") @db.Uuid
+  resolutionSummary String?              @map("resolution_summary") @db.VarChar(2000)
+  /// Number of times the alert has been reopened after a resolution.
+  reopenCount       Int                  @default(0) @map("reopen_count")
+  createdAt         DateTime             @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt         DateTime             @updatedAt @map("updated_at") @db.Timestamptz(3)
+  resolvedAt        DateTime?            @map("resolved_at") @db.Timestamptz(3)
+
+  transaction    Transaction         @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  riskAssessment RiskAssessment      @relation(fields: [riskAssessmentId], references: [id], onDelete: Cascade)
+  assignedTo     User?               @relation("AlertAssignee", fields: [assignedToId], references: [id], onDelete: SetNull)
+  resolvedBy     User?               @relation("AlertResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+  notes          InvestigationNote[]
+
+  /// One alert per (transaction, assessment). Re-running the same assessment
+  /// cannot produce a second alert.
+  @@unique([transactionId, riskAssessmentId], map: "alerts_transaction_assessment_key")
+  @@index([status, createdAt(sort: Desc)])
+  @@index([severity, createdAt(sort: Desc)])
+  @@index([outcome])
+  @@index([assignedToId, status])
+  @@index([createdAt(sort: Desc)])
+  @@index([resolvedAt])
+  @@map("alerts")
+}
+
+/// Append-only investigation note. The application exposes create and read
+/// only: there is no update or delete endpoint.
+model InvestigationNote {
+  id        String   @id @default(uuid()) @db.Uuid
+  alertId   String   @map("alert_id") @db.Uuid
+  authorId  String   @map("author_id") @db.Uuid
+  body      String   @db.VarChar(4000)
+  createdAt DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  alert  Alert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  author User  @relation(fields: [authorId], references: [id], onDelete: Restrict)
+
+  @@index([alertId, createdAt(sort: Desc)])
+  @@index([authorId])
+  @@map("investigation_notes")
+}
+
+// ---------------------------------------------------------------------------
+// Detection configuration
+// ---------------------------------------------------------------------------
+
+model FraudRule {
+  id             String   @id @default(uuid()) @db.Uuid
+  ruleId         String   @unique @map("rule_id") @db.VarChar(64)
+  name           String   @db.VarChar(160)
+  description    String   @db.VarChar(1000)
+  enabled        Boolean  @default(true)
+  /// Maximum risk contribution this rule can add, 0..100.
+  weight         Decimal  @db.Decimal(5, 2)
+  /// Rule-specific thresholds, validated per rule before being stored.
+  config         Json     @db.JsonB
+  rulesetVersion String   @map("ruleset_version") @db.VarChar(32)
+  updatedById    String?  @map("updated_by_id") @db.Uuid
+  createdAt      DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  updatedBy User? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([enabled])
+  @@index([rulesetVersion])
+  @@map("fraud_rules")
+}
+
+/// Risk-category boundaries and the alert threshold. A single row, identified
+/// by `singleton`, which a CHECK constraint pins to `true`.
+model RiskSettings {
+  id              String   @id @default(uuid()) @db.Uuid
+  singleton       Boolean  @unique @default(true)
+  mediumThreshold Int      @map("medium_threshold")
+  highThreshold   Int      @map("high_threshold")
+  alertThreshold  Int      @map("alert_threshold")
+  rulesetVersion  String   @map("ruleset_version") @db.VarChar(32)
+  updatedById     String?  @map("updated_by_id") @db.Uuid
+  createdAt       DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt       DateTime @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  updatedBy User? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@map("risk_settings")
+}
+
+// ---------------------------------------------------------------------------
+// Audit log
+// ---------------------------------------------------------------------------
+
+/// Append-only audit trail. No application endpoint updates or deletes these
+/// rows, and a database trigger blocks UPDATE and DELETE outright.
+model AuditLog {
+  id         String   @id @default(uuid()) @db.Uuid
+  /// Null for unauthenticated events such as a failed login attempt.
+  actorId    String?  @map("actor_id") @db.Uuid
+  action     String   @db.VarChar(64)
+  entityType String   @map("entity_type") @db.VarChar(64)
+  entityId   String?  @map("entity_id") @db.VarChar(64)
+  /// Metadata that has been explicitly allow-listed as safe to persist. Never
+  /// contains passwords, tokens or raw request bodies.
+  metadata   Json?    @db.JsonB
+  requestId  String   @map("request_id") @db.VarChar(64)
+  ipAddress  String?  @map("ip_address") @db.VarChar(64)
+  createdAt  DateTime @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt(sort: Desc)])
+  @@index([actorId, createdAt(sort: Desc)])
+  @@index([action, createdAt(sort: Desc)])
+  @@index([entityType, entityId])
+  @@index([requestId])
+  @@map("audit_logs")
+}

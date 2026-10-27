@@ -1,0 +1,228 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+  workflow_dispatch:
+
+# A new push to the same branch cancels the previous run: a superseded result
+# tells nobody anything and just occupies a runner.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+
+jobs:
+  quality:
+    name: Lint, format and unit tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # `npm ci` installs exactly what the lockfile pins and fails if the
+      # lockfile and manifests disagree, which is what makes CI reproducible.
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Generate the Prisma client
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Check formatting
+        run: npm run format:check
+
+      - name: Unit tests (fraud engine, scoring, utilities)
+        run: npm run test:api:unit
+
+      - name: Web component tests
+        run: npm run test:web
+
+  integration:
+    name: Integration tests against PostgreSQL
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: fraudlens
+          POSTGRES_PASSWORD: fraudlens
+          POSTGRES_DB: fraudlens
+        ports:
+          - 5432:5432
+        # The job must not start querying before the server accepts
+        # connections, or the first test fails for the wrong reason.
+        options: >-
+          --health-cmd "pg_isready -U fraudlens"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+
+    env:
+      DATABASE_URL: postgresql://fraudlens:fraudlens@localhost:5432/fraudlens?schema=public
+      TEST_DATABASE_URL: postgresql://fraudlens:fraudlens@localhost:5432/fraudlens_test?schema=public
+      JWT_SECRET: ci-jwt-secret-value-that-is-long-enough-to-pass-validation
+      COOKIE_SECRET: ci-cookie-secret-value-that-is-long-enough-to-pass-check
+      NODE_ENV: test
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Generate the Prisma client
+        run: npx prisma generate
+
+      - name: Create the test database
+        run: |
+          PGPASSWORD=fraudlens psql -h localhost -U fraudlens -d postgres \
+            -c 'CREATE DATABASE fraudlens_test'
+
+      - name: Apply migrations to the test database
+        run: npx prisma migrate deploy
+        env:
+          DATABASE_URL: ${{ env.TEST_DATABASE_URL }}
+
+      # Proves the migrations describe the schema completely: a drift here
+      # means someone changed the schema without writing a migration.
+      - name: Verify the migrations leave no schema drift
+        run: |
+          npx prisma migrate diff \
+            --from-url "$TEST_DATABASE_URL" \
+            --to-schema-datamodel prisma/schema.prisma \
+            --exit-code && echo "No drift detected"
+
+      - name: Integration tests
+        run: npm run test:api:integration
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Install dependencies from the lockfile
+        run: npm ci
+
+      - name: Generate the Prisma client
+        run: npx prisma generate
+
+      - name: Build the web client
+        run: npm run build
+
+      # The API has no build step, so this checks that every module at least
+      # loads — a broken import would otherwise only surface at runtime.
+      - name: Verify the API loads
+        run: node --check apps/api/src/server.js && node -e "import('./apps/api/src/app.js').then(() => console.log('API modules load'))"
+        env:
+          DATABASE_URL: postgresql://user:pass@localhost:5432/db?schema=public
+          JWT_SECRET: build-check-secret-value-long-enough-for-validation-xx
+          COOKIE_SECRET: build-check-cookie-secret-long-enough-for-validation
+
+      - name: Upload the web bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-dist
+          path: apps/web/dist
+          retention-days: 7
+
+  docker:
+    name: Docker images
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      # Images are built to verify the Dockerfiles, never pushed: publishing
+      # requires a configured registry and credentials, which this repository
+      # deliberately does not assume.
+      - name: Build the API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          load: true
+          tags: fraudlens-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build the web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          load: true
+          tags: fraudlens-web:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Validate the Compose file
+        run: docker compose config --quiet
+        env:
+          JWT_SECRET: compose-validation-only
+          COOKIE_SECRET: compose-validation-only
+          SEED_ADMIN_PASSWORD: compose-validation-only
+
+  stack:
+    name: End-to-end stack smoke test
+    runs-on: ubuntu-latest
+    needs: [docker]
+    steps:
+      - uses: actions/checkout@v4
+
+      # Brings the whole stack up exactly as a developer would, and checks the
+      # application actually answers — a passing unit suite does not prove the
+      # containers compose correctly.
+      - name: Start the stack
+        run: docker compose up --build --detach --wait --wait-timeout 300
+        env:
+          JWT_SECRET: ci-stack-jwt-secret-value-long-enough-to-pass-validation
+          COOKIE_SECRET: ci-stack-cookie-secret-value-long-enough-to-validate
+          SEED_ADMIN_PASSWORD: CiStackAdmin1Pass
+          SEED_TRANSACTION_COUNT: '120'
+
+      - name: Check the API reports healthy
+        run: |
+          curl -fsS http://localhost:4000/api/v1/health | tee /dev/stderr | grep -q '"status":"ok"'
+
+      - name: Check the web client is served
+        run: curl -fsS http://localhost:8080/ | grep -q '<div id="root">'
+
+      - name: Check sign-in works end to end
+        run: |
+          curl -fsS -X POST http://localhost:8080/api/v1/auth/login \
+            -H 'Content-Type: application/json' \
+            -d '{"email":"admin@fraudlens.local","password":"CiStackAdmin1Pass"}' \
+            | grep -q '"role":"ADMIN"'
+
+      - name: Print logs on failure
+        if: failure()
+        run: docker compose logs --no-color --tail 200
+
+      - name: Tear down
+        if: always()
+        run: docker compose down --volumes

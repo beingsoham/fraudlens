@@ -1,0 +1,179 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: light;
+  }
+
+  html,
+  body,
+  #root {
+    @apply h-full;
+  }
+
+  body {
+    @apply bg-canvas text-fg font-sans antialiased;
+    /*
+     * Three slow colour fields behind everything. They are what the glass
+     * panels refract: without something coloured underneath, a blurred white
+     * panel on a white page is indistinguishable from a flat one.
+     */
+    background-image:
+      radial-gradient(40rem 30rem at 8% -6%, rgba(109, 109, 245, 0.42), transparent 60%),
+      radial-gradient(34rem 28rem at 96% 2%, rgba(20, 184, 214, 0.36), transparent 58%),
+      radial-gradient(38rem 30rem at 72% 104%, rgba(236, 72, 153, 0.28), transparent 60%),
+      radial-gradient(30rem 24rem at 38% 52%, rgba(168, 85, 247, 0.2), transparent 62%);
+    background-attachment: fixed;
+  }
+
+  /*
+   * A visible focus ring on every interactive element: this is a tool people
+   * operate all day, and keyboard navigation has to be real.
+   */
+  *:focus-visible {
+    @apply outline-none ring-2 ring-accent/60 ring-offset-2 ring-offset-canvas;
+  }
+
+  ::selection {
+    @apply bg-accent/20 text-fg;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: theme('colors.line.2') transparent;
+  }
+  *::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+  *::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  *::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-line-2;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  *::-webkit-scrollbar-thumb:hover {
+    @apply bg-line-3;
+  }
+
+  /* Numbers in tables must align on the decimal point to be scannable. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /*
+   * The glass primitive.
+   *
+   * `backdrop-saturate` is doing real work here: blurring alone washes the
+   * colour out of what sits behind the panel, and pushing saturation back up
+   * is what keeps the refracted colour alive instead of grey.
+   */
+  .glass {
+    @apply border border-white/60 bg-white/55 shadow-glass;
+    /*
+     * A diagonal sheen over the translucent fill. Without it the panel is just
+     * frosted plastic; the highlight running off one corner is what reads as a
+     * curved, lit surface.
+     */
+    background-image: linear-gradient(
+      135deg,
+      rgba(255, 255, 255, 0.58) 0%,
+      rgba(255, 255, 255, 0.16) 34%,
+      rgba(255, 255, 255, 0) 58%
+    );
+    backdrop-filter: blur(22px) saturate(185%);
+    -webkit-backdrop-filter: blur(22px) saturate(185%);
+  }
+
+  /* A lighter weight of the same material, for chrome that frames content. */
+  .glass-chrome {
+    @apply border-white/50 bg-white/45;
+    backdrop-filter: blur(18px) saturate(170%);
+    -webkit-backdrop-filter: blur(18px) saturate(170%);
+  }
+
+  .panel {
+    @apply glass rounded-xl;
+  }
+
+  .panel-header {
+    @apply flex items-center justify-between gap-3 border-b border-line/70 px-5 py-3.5;
+  }
+
+  .panel-title {
+    @apply text-sm font-semibold tracking-tight text-fg;
+  }
+
+  .label {
+    @apply mb-1.5 block text-xs font-medium text-fg-muted;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-white/70 bg-white/70 px-3 py-2 text-sm text-fg
+      shadow-[inset_0_1px_2px_rgba(21,24,48,0.05)] backdrop-blur-sm transition-all
+      placeholder:text-fg-faint
+      hover:border-white hover:bg-white/85
+      focus:border-accent/60 focus:bg-white focus:shadow-glow;
+  }
+
+  .select {
+    @apply input appearance-none bg-no-repeat pr-9;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 24 24' fill='none' stroke='%23525a79' stroke-width='2'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-position: right 0.65rem center;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm
+      font-medium transition-all disabled:cursor-not-allowed disabled:opacity-45;
+  }
+
+  .btn-primary {
+    @apply btn bg-accent text-white shadow-raised hover:bg-accent-dim active:scale-[0.98];
+  }
+
+  /* The default control: glass, so it sits in the same material as the panels. */
+  .btn-secondary {
+    @apply btn border border-white/80 bg-white/65 text-fg shadow-raised backdrop-blur-md
+      hover:border-white hover:bg-white/90 active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn text-fg-muted hover:bg-white/70 hover:text-fg;
+  }
+
+  .btn-danger {
+    @apply btn border border-risk-high/30 bg-risk-high/10 text-risk-high
+      hover:border-risk-high/50 hover:bg-risk-high/20;
+  }
+
+  .badge {
+    /* `whitespace-nowrap` keeps a two-word badge on one line; without it a
+       narrow table column wraps it and the row height jumps. */
+    @apply inline-flex items-center gap-1 whitespace-nowrap rounded-md px-2 py-0.5
+      text-2xs font-semibold uppercase tracking-wide;
+  }
+
+  .table-head {
+    @apply border-b border-line/80 bg-white/55 text-left text-2xs font-semibold
+      uppercase tracking-wider text-fg-muted backdrop-blur-sm;
+  }
+
+  .table-row {
+    @apply border-b border-line/50 transition-colors hover:bg-white/70;
+  }
+
+  .link {
+    @apply font-medium text-accent underline-offset-2 transition-colors
+      hover:text-accent-dim hover:underline;
+  }
+
+  .skeleton {
+    @apply animate-pulse rounded bg-surface-3/80;
+  }
+}

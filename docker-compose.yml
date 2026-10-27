@@ -1,0 +1,122 @@
+# FraudLens — local stack.
+#
+#   docker compose up --build       start everything
+#   docker compose logs -f api      follow the API log
+#   docker compose down             stop and remove the containers
+#   docker compose down -v          also delete the database volume
+#
+# Startup order is enforced by health checks rather than `depends_on` alone:
+# the API waits for PostgreSQL to accept connections, the migration job waits
+# for the API image to be built, and the web container waits for the API to be
+# healthy.
+
+name: fraudlens
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fraudlens}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fraudlens}
+      POSTGRES_DB: ${POSTGRES_DB:-fraudlens}
+      # Deterministic collation, so ORDER BY on text behaves identically
+      # wherever the stack runs.
+      POSTGRES_INITDB_ARGS: '--locale=C --encoding=UTF8'
+    ports:
+      - '${POSTGRES_PORT:-5433}:5432'
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-fraudlens} -d ${POSTGRES_DB:-fraudlens}']
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+
+  # Applies migrations and seeds, then exits. The API will not start until this
+  # has completed successfully, so the API never serves an unmigrated database.
+  migrate:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      DATABASE_URL: 'postgresql://${POSTGRES_USER:-fraudlens}:${POSTGRES_PASSWORD:-fraudlens}@postgres:5432/${POSTGRES_DB:-fraudlens}?schema=public'
+      JWT_SECRET: '${JWT_SECRET:?JWT_SECRET is required - generate one with openssl rand -base64 48}'
+      COOKIE_SECRET: '${COOKIE_SECRET:?COOKIE_SECRET is required - generate one with openssl rand -base64 48}'
+      SEED_DEMO_DATA: ${SEED_DEMO_DATA:-true}
+      SEED_TRANSACTION_COUNT: ${SEED_TRANSACTION_COUNT:-1200}
+      SEED_ADMIN_EMAIL: ${SEED_ADMIN_EMAIL:-admin@fraudlens.local}
+      SEED_ADMIN_PASSWORD: '${SEED_ADMIN_PASSWORD:?SEED_ADMIN_PASSWORD is required}'
+      SEED_ANALYST_PASSWORD: ${SEED_ANALYST_PASSWORD:-ChangeMe!Analyst123}
+      SEED_INVESTIGATOR_PASSWORD: ${SEED_INVESTIGATOR_PASSWORD:-ChangeMe!Investigator123}
+      SEED_VIEWER_PASSWORD: ${SEED_VIEWER_PASSWORD:-ChangeMe!Viewer123}
+    entrypoint: ['/bin/sh', '-c']
+    command:
+      - |
+        set -e
+        echo "Applying database migrations..."
+        npx prisma migrate deploy
+        echo "Seeding..."
+        node prisma/seed.js
+    restart: 'no'
+
+  api:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      DATABASE_URL: 'postgresql://${POSTGRES_USER:-fraudlens}:${POSTGRES_PASSWORD:-fraudlens}@postgres:5432/${POSTGRES_DB:-fraudlens}?schema=public'
+      JWT_SECRET: '${JWT_SECRET:?JWT_SECRET is required}'
+      JWT_EXPIRES_IN: ${JWT_EXPIRES_IN:-12h}
+      COOKIE_SECRET: '${COOKIE_SECRET:?COOKIE_SECRET is required}'
+      # The browser reaches the API through the web container's nginx proxy, so
+      # the allowed origin is the web container's published address.
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
+      RISK_MEDIUM_THRESHOLD: ${RISK_MEDIUM_THRESHOLD:-30}
+      RISK_HIGH_THRESHOLD: ${RISK_HIGH_THRESHOLD:-70}
+      ALERT_THRESHOLD: ${ALERT_THRESHOLD:-70}
+      RULESET_VERSION: ${RULESET_VERSION:-2026.10.1}
+      SIMULATOR_MAX_RATE: ${SIMULATOR_MAX_RATE:-25}
+      SIMULATOR_AUTOSTART: 'false'
+    ports:
+      - '${API_PORT:-4000}:4000'
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1:4000/api/v1/health/ready']
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - '${WEB_PORT:-8080}:80'
+    healthcheck:
+      test: ['CMD', 'curl', '-fsS', 'http://127.0.0.1/healthz']
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres-data:
+    driver: local
