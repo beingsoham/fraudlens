@@ -1,8 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { RULE_ID } from '@fraudlens/shared/constants';
 import { RULE_STATUS, RULE_IMPLEMENTATIONS } from '../../src/modules/fraud/rules.js';
-import { emptyFeatures } from '../../src/modules/fraud/features.js';
-import { defaultRuleset } from '../../src/modules/fraud/ruleset.service.js';
+import { defaultRuleset, emptyFeatures } from '../../src/modules/fraud/defaults.js';
 
 /**
  * Unit tests for every detection rule.

@@ -185,6 +185,10 @@ model Transaction {
   @@index([senderId, receiverId, occurredAt(sort: Desc)])
   // Device-history lookups for the new-device rule.
   @@index([senderId, deviceFingerprint])
+  // Receiver fan-in over a rolling window: counts distinct senders per
+  // receiver. Created by the constraints migration; declared here so the
+  // datamodel matches the database.
+  @@index([receiverId, occurredAt(sort: Desc), senderId], map: "transactions_receiver_occurred_sender_idx")
   // Global monitoring list and date-range filters.
   @@index([occurredAt(sort: Desc)])
   @@index([createdAt(sort: Desc)])
@@ -237,6 +241,9 @@ model RiskAssessment {
   alerts      Alert[]
 
   @@index([transactionId, assessedAt(sort: Desc)])
+  // Covers the "latest assessment per transaction" lookup used by every list
+  // view. Created by the constraints migration; declared here to match.
+  @@index([transactionId, assessedAt(sort: Desc), riskScore], map: "risk_assessments_txn_assessed_score_idx")
   @@index([riskCategory])
   @@index([riskScore])
   @@index([assessedAt(sort: Desc)])

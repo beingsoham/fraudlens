@@ -263,58 +263,8 @@ export async function loadTransactionFeatures(input, ruleset, client = defaultCl
   };
 }
 
-/**
- * Feature set for an account with no history at all.
- *
- * Used by the unit tests and as the documented shape of the contract between
- * `loadTransactionFeatures` and the pure engine.
- */
-export function emptyFeatures(overrides = {}) {
-  return {
-    windows: {
-      amountLookbackDays: 30,
-      deviceLookbackDays: 90,
-      timeLookbackDays: 30,
-      velocityWindowMinutes: 10,
-      pairWindowMinutes: 30,
-      fanInWindowHours: 24,
-      surgeRecentHours: 24,
-      surgeBaselineDays: 14,
-      convention: '(start, end] on occurredAt, excluding the assessed transaction',
-    },
-    sender: {
-      historyCount: 0,
-      amountHistory: [],
-      amountHistoryCount: 0,
-      amountMedian: null,
-      amountMad: null,
-      knownDevices: [],
-      knownDeviceCount: 0,
-      transactionsInVelocityWindow: 0,
-      hourHistogram: Array.from({ length: 24 }, () => 0),
-      hourHistoryCount: 0,
-      firstSeenAt: null,
-      recentCount: 0,
-      recentValue: 0,
-      baselineCount: 0,
-      baselineValue: 0,
-      ...(overrides.sender ?? {}),
-    },
-    pair: { transfersInWindow: 0, totalAmountInWindow: 0, ...(overrides.pair ?? {}) },
-    receiver: {
-      distinctSendersInWindow: 0,
-      transactionsInWindow: 0,
-      isMerchant: false,
-      status: 'ACTIVE',
-      ...(overrides.receiver ?? {}),
-    },
-    device: { fingerprint: 'device-unknown', isKnown: false, ...(overrides.device ?? {}) },
-    ...Object.fromEntries(
-      Object.entries(overrides).filter(
-        ([key]) => !['sender', 'pair', 'receiver', 'device'].includes(key),
-      ),
-    ),
-  };
-}
+// Re-exported so callers that already reach for it here keep working; the
+// definition itself lives in the pure `defaults.js`.
+export { emptyFeatures } from './defaults.js';
 
 export { Prisma, MAX_AMOUNT_HISTORY };

@@ -129,53 +129,8 @@ export async function getActiveRuleset({ fresh = false, client } = {}) {
   return ruleset;
 }
 
-/**
- * Builds a ruleset from the catalogue defaults, without touching the database.
- * Used by the unit tests so engine behaviour is pinned to documented defaults
- * rather than to whatever happens to be configured locally.
- */
-export function defaultRuleset(overrides = {}) {
-  const rules = {};
-  for (const rule of RULE_CATALOGUE) {
-    rules[rule.ruleId] = {
-      ruleId: rule.ruleId,
-      name: rule.name,
-      description: rule.description,
-      enabled: true,
-      weight: rule.weight,
-      config: structuredClone(rule.config),
-      configValid: true,
-      rulesetVersion: 'test',
-    };
-  }
-
-  const ruleset = {
-    version: 'test',
-    riskSettings: { ...DEFAULT_RISK_SETTINGS },
-    riskSettingsValid: true,
-    rules,
-    enabledRuleIds: RULE_IDS,
-    loadedAt: new Date(0),
-  };
-
-  // Shallow-merge overrides, then deep-merge the two nested objects callers
-  // most often want to adjust.
-  const merged = { ...ruleset, ...overrides };
-  if (overrides.riskSettings) {
-    merged.riskSettings = { ...ruleset.riskSettings, ...overrides.riskSettings };
-  }
-  if (overrides.rules) {
-    merged.rules = { ...ruleset.rules };
-    for (const [ruleId, patch] of Object.entries(overrides.rules)) {
-      merged.rules[ruleId] = {
-        ...(ruleset.rules[ruleId] ?? {}),
-        ...patch,
-        config: { ...(ruleset.rules[ruleId]?.config ?? {}), ...(patch.config ?? {}) },
-      };
-    }
-    merged.enabledRuleIds = RULE_IDS.filter((ruleId) => merged.rules[ruleId]?.enabled);
-  }
-  return merged;
-}
+// Re-exported for convenience; defined in the pure `defaults.js` so that
+// importing it does not drag in the database client.
+export { defaultRuleset } from './defaults.js';
 
 export { CACHE_TTL_MS };

@@ -20,7 +20,7 @@ import {
   startOfUtcDay,
   startOfUtcWeek,
 } from '../../src/utils/time.js';
-import { sanitizeMetadata } from '../../src/modules/audit/audit.service.js';
+import { sanitizeMetadata } from '../../src/modules/audit/audit.metadata.js';
 
 describe('CSV formula-injection protection', () => {
   it('recognises every character a spreadsheet treats as a formula start', () => {
