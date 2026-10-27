@@ -15,7 +15,7 @@
  * stored. This is what stops a password, a token or a whole request body from
  * being written into the audit trail by a careless call site.
  */
-const ALLOWED_METADATA_KEYS = new Set([
+export const ALLOWED_METADATA_KEYS = new Set([
   'email',
   'role',
   'previousRole',
