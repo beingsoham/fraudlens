@@ -131,6 +131,20 @@ export function buildAccountRoster({ seed = 1, count = 40 } = {}) {
   return accounts;
 }
 
+/** The prefix shared by every external id generated for `seed`. */
+export function simulatorExternalIdPrefix(seed) {
+  return `SIMTX-${seed}-`;
+}
+
+/**
+ * The sequence number encoded in a simulator external id, or 0 when the id was
+ * not produced by this generator.
+ */
+export function parseSimulatorExternalIdSequence(externalId) {
+  const match = /^SIMTX-\d+-(\d+)$/.exec(externalId ?? '');
+  return match ? Number(match[1]) : 0;
+}
+
 /**
  * Creates a generator.
  *
@@ -138,11 +152,14 @@ export function buildAccountRoster({ seed = 1, count = 40 } = {}) {
  * @param {number} options.seed Deterministic RNG seed.
  * @param {{accountRef: string, isMerchant?: boolean, isMule?: boolean}[]} options.accounts
  * @param {object} [options.scenarioDistribution] Relative scenario weights.
+ * @param {number} [options.sequenceStart] Continue external ids after this
+ *   sequence number, so a repeated run does not reissue ids already persisted.
  */
 export function createTransactionGenerator({
   seed = 1,
   accounts,
   scenarioDistribution = DEFAULT_SCENARIO_DISTRIBUTION,
+  sequenceStart = 0,
 } = {}) {
   if (!Array.isArray(accounts) || accounts.length < 4) {
     throw new Error('The generator needs at least 4 accounts');
@@ -164,7 +181,7 @@ export function createTransactionGenerator({
     );
   }
 
-  let sequence = 0;
+  let sequence = sequenceStart;
   /** Queued transactions from multi-transaction scenarios, in emission order. */
   const pending = [];
 
@@ -179,8 +196,11 @@ export function createTransactionGenerator({
   function nextExternalId() {
     sequence += 1;
     // Includes the seed so two generators with different seeds never collide in
-    // the same database.
-    return `SIMTX-${seed}-${String(sequence).padStart(8, '0')}`;
+    // the same database. `sequenceStart` carries the count past ids an earlier
+    // run with this seed already persisted: ingestion is idempotent on the
+    // external id, so restarting at 1 would make every transaction of a
+    // repeated run a duplicate that is skipped without any error.
+    return `${simulatorExternalIdPrefix(seed)}${String(sequence).padStart(8, '0')}`;
   }
 
   function knownDevice(accountRef) {

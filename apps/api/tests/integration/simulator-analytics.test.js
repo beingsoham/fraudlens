@@ -66,6 +66,37 @@ describe('simulator lifecycle', () => {
     expect(assessments).toBe(await prisma.transaction.count());
   });
 
+  it('continues its id sequence when the same seed is run again', async () => {
+    const run = async () => {
+      await analyst
+        .write('post', '/simulator/start')
+        .send({ ratePerSecond: 20, seed: 4242, maxTransactions: 5 })
+        .expect(200);
+
+      const deadline = Date.now() + 15_000;
+      while (Date.now() < deadline) {
+        const status = await analyst.get('/simulator/status').expect(200);
+        if (!status.body.data.running) return status.body.data;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      throw new Error('the simulator never reached its transaction limit');
+    };
+
+    const first = await run();
+    expect(first.counters.ingested).toBeGreaterThanOrEqual(5);
+    expect(first.counters.duplicates).toBe(0);
+
+    const second = await run();
+    // Ingestion is idempotent on the external id, so a sequence that restarted
+    // at 1 would have every transaction here skipped as a duplicate: a worker
+    // reporting itself RUNNING while writing nothing at all.
+    expect(second.counters.duplicates).toBe(0);
+    expect(second.counters.ingested).toBeGreaterThanOrEqual(5);
+    expect(await prisma.transaction.count()).toBeGreaterThanOrEqual(
+      first.counters.ingested + second.counters.ingested,
+    );
+  });
+
   it('labels generated transactions with their scenario as ground truth', async () => {
     await analyst
       .write('post', '/simulator/start')

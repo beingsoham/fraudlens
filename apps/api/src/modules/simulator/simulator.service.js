@@ -10,6 +10,8 @@ import {
   DEFAULT_SCENARIO_DISTRIBUTION,
   buildAccountRoster,
   createTransactionGenerator,
+  parseSimulatorExternalIdSequence,
+  simulatorExternalIdPrefix,
 } from './generator.js';
 
 const log = moduleLogger('simulator');
@@ -174,6 +176,27 @@ async function tick() {
 }
 
 /**
+ * The highest external-id sequence already persisted for this seed.
+ *
+ * Ingestion is idempotent on the external id, so a run that restarted its
+ * sequence at 1 would have every transaction rejected as a duplicate until the
+ * count passed the previous run's total — a simulator that reports itself
+ * RUNNING while ingesting nothing, then appears to recover on its own. The
+ * generated stream stays reproducible for a given seed; only the ids continue.
+ *
+ * Ordering by id is numeric here because the sequence is zero-padded to eight
+ * digits, which holds until a single seed exceeds 99,999,999 transactions.
+ */
+async function lastPersistedSequence(seed) {
+  const latest = await prisma.transaction.findFirst({
+    where: { externalId: { startsWith: simulatorExternalIdPrefix(seed) } },
+    orderBy: { externalId: 'desc' },
+    select: { externalId: true },
+  });
+  return parseSimulatorExternalIdSequence(latest?.externalId);
+}
+
+/**
  * Starts the simulator.
  *
  * @param {object} payload Validated `startSimulatorSchema` body.
@@ -229,6 +252,7 @@ export async function startSimulator(payload, context) {
       seed: state.config.seed,
       accounts,
       scenarioDistribution,
+      sequenceStart: await lastPersistedSequence(state.config.seed),
     });
     state.counters = {
       attempted: 0,
